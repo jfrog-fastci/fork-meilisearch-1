@@ -1,24 +1,37 @@
-# Compile
-FROM    rust:1.89-alpine3.22 AS compiler
+# Compile - dependency-layer trick
+# Copy only Cargo manifests first, fetch dependencies to create a cached layer,
+# then copy source and perform release build. This keeps dependency resolution
+# and download in an earlier layer so CI remote cache is effective.
+FROM rust:1.89-alpine3.22 AS builder
+RUN apk add -q --no-cache build-base openssl-dev git
+WORKDIR /app
 
-RUN     apk add -q --no-cache build-base openssl-dev
+# Copy only manifests to leverage Docker layer caching for dependencies.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/*/Cargo.toml crates/
+# Some projects include a .cargo directory for configuration; copy if present.
+COPY .cargo .cargo
 
-WORKDIR /
+# Create a tiny dummy main so cargo can operate and fetch dependencies.
+RUN mkdir -p src && echo 'fn main() { println!("dummy"); }' > src/main.rs
 
+# Fetch dependencies (populates cargo registry/git cache).
+RUN cargo fetch --locked
+
+# Now copy the full repository and build the final binaries.
+COPY . .
 ARG     COMMIT_SHA
 ARG     COMMIT_DATE
 ARG     GIT_TAG
 ARG     EXTRA_ARGS
 ENV     VERGEN_GIT_SHA=${COMMIT_SHA} VERGEN_GIT_COMMIT_TIMESTAMP=${COMMIT_DATE} VERGEN_GIT_DESCRIBE=${GIT_TAG}
 ENV     RUSTFLAGS="-C target-feature=-crt-static"
-
-COPY    . .
 RUN     set -eux; \
         apkArch="$(apk --print-arch)"; \
         cargo build --release -p meilisearch -p meilitool ${EXTRA_ARGS}
 
-# Run
-FROM    alpine:3.22
+# Run image
+FROM alpine:3.22
 LABEL   org.opencontainers.image.source="https://github.com/meilisearch/meilisearch"
 
 ENV     MEILI_HTTP_ADDR 0.0.0.0:7700
@@ -26,21 +39,13 @@ ENV     MEILI_SERVER_PROVIDER docker
 
 RUN     apk add -q --no-cache libgcc tini curl
 
-# add meilisearch and meilitool to the `/bin` so you can run it from anywhere
-# and it's easy to find.
-COPY    --from=compiler /target/release/meilisearch /bin/meilisearch
-COPY    --from=compiler /target/release/meilitool /bin/meilitool
-# To stay compatible with the older version of the container (pre v0.27.0) we're
-# going to symlink the meilisearch binary in the path to `/meilisearch`
+# copy final binaries from builder stage
+COPY    --from=builder /app/target/release/meilisearch /bin/meilisearch
+COPY    --from=builder /app/target/release/meilitool /bin/meilitool
 RUN     ln -s /bin/meilisearch /meilisearch
 
-# This directory should hold all the data related to meilisearch so we're going
-# to move our PWD in there.
-# We don't want to put the meilisearch binary
 WORKDIR /meili_data
-
-
 EXPOSE  7700/tcp
-
 ENTRYPOINT ["tini", "--"]
 CMD     /bin/meilisearch
+
