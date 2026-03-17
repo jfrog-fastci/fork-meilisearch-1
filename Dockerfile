@@ -6,17 +6,13 @@ FROM rust:1.89-alpine3.22 AS builder
 RUN apk add -q --no-cache build-base openssl-dev git
 WORKDIR /app
 
-# Copy only manifests to leverage Docker layer caching for dependencies.
-COPY Cargo.toml Cargo.lock ./
-COPY crates/*/Cargo.toml crates/
-# Some projects include a .cargo directory for configuration; copy if present.
-COPY .cargo .cargo
+COPY . .
 
 # Create a tiny dummy main so cargo can operate and fetch dependencies.
 RUN mkdir -p src && echo 'fn main() { println!("dummy"); }' > src/main.rs
 
 # Fetch dependencies (populates cargo registry/git cache).
-RUN cargo fetch --locked
+RUN cargo build --release -p meilisearch -p meilitool ${EXTRA_ARGS}
 
 # Now copy the full repository and build the final binaries.
 COPY . .
